@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+import json
+import socket
+import ssl
+import argparse
+import random
+
+
+# parses commend line arguments
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Client for socket connection')
+    parser.add_argument('hostname')
+    parser.add_argument('username')
+    parser.add_argument('-p', '--port', type=int)
+    parser.add_argument('-s', '--tls', action='store_true')
+    return parser.parse_args()
+
+
+# Connects user to right port based on arguments provided
+def try_ports(args):
+    # Determine the port based on the provided arguments
+    if args.tls and not args.port:
+        port = 27994
+    else:
+        port = args.port or 27993
+
+    # Create a socket
+    if args.tls:
+        # Use TLS encrypted socket
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False  # Add this line to disable hostname verification CHECK THESEEEEE
+        context.verify_mode = ssl.CERT_NONE  # Add this line to disable certificate verification
+        client_socket = context.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM),
+                                            server_hostname=args.hostname)
+    else:
+        # Use regular socket
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    # Connect to the server
+    try:
+        client_socket.connect((args.hostname, port))
+    except Exception as e:
+        print(f"Error connecting to the server: {e}")
+        return
+
+    return client_socket
+
+# Sends a message to the client
+def send_message(client_socket, message):
+    try:
+        # Encode the message as bytes and send it over the socket
+        client_socket.sendall(message.encode())
+    except Exception as e:
+        print(f"Error sending message: {e}")
+
+
+# Handles receiving messages from server and parsing them
+def receive_message(client_socket):
+    try:
+        # Initialize an empty string to store the received data
+        received_data = ""
+
+        while True:
+            # Receive data from the socket and decode it
+            data_chunk = client_socket.recv(1024).decode()
+
+            # Break the loop if no more data is received
+            if not data_chunk:
+                break
+
+            # Append the received data to the accumulated string
+            received_data += data_chunk
+
+            # Check if the received data ends with a newline character, indicating the end of the JSON message
+            if received_data.endswith('\n'):
+                break
+
+        return received_data
+    except Exception as e:
+        print(f"Error receiving message: {e}")
+        return None
+
+
+# handles sending first message to server
+def handle_hello_message(client_socket, username):
+    hello_message = f'{{"type": "hello", "northeastern_username": "{username}"}}\n'
+    send_message(client_socket, hello_message)
+
+    # Example: Receive and print the response
+    response = receive_message(client_socket)
+
+    try:
+        # Parse the JSON response
+        json_data = json.loads(response)
+        game_id = json_data.get("id", "Unknown")
+        return game_id
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON: {e}")
+
+
+def load_words_from_file(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            words = file.read().splitlines()
+        return words
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        return []
+
+
+# Selects a random word from a provided array
+def select_random_word(words):
+    if not words:
+        return None
+    return random.choice(words)
+
+
+# Returns the server response to client guess
+def send_guess(client_socket, guess, game_id):
+    # Example: Send a guess message to the server
+    guess_message = f'{{"type": "guess", "id": "{game_id}", "word": "{guess}"}}\n'
+    send_message(client_socket, guess_message)
+
+    # Example: Receive and handle the response
+    response = receive_message(client_socket)
+    # print(f"Received response to guess message: {response}")
+    return response
+
+
+# Helps put together an array of letters that are contained in the correct response
+def filter_letters_by_numbers(word, numbers):
+    return [letter for letter, num in zip(word, numbers) if num in {1, 2}]
+
+
+# Looks through word list to find words with right letter restrictions
+def find_words_with_letters(words, letters):
+    return [word for word in words if all(letter in word for letter in letters)]
+
+
+def main():
+    # Parse arguments
+    args = parse_arguments()
+
+    client_socket = try_ports(args)
+
+    # Load possible guesses from file
+    file_path = 'project1-words.txt'
+    all_words = load_words_from_file(file_path)
+
+    # Receive game ID from Hello message
+    game_id = handle_hello_message(client_socket, args.username)
+
+    # Generate first guess
+    current_guess = select_random_word(all_words)
+
+    # Continue making guesses until a "bye" message is received
+    while True:
+        # Send the guess to the server and receive the response
+        response = send_guess(client_socket, current_guess, game_id)
+
+        # Parse the JSON response
+        try:
+            json_data = json.loads(response)
+            message_type = json_data.get("type")
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON: {e}")
+            break  # Exit the loop if there's an error in decoding JSON
+
+        # Check if it's a "bye" message
+        if message_type == "bye":
+            flag = json_data.get("flag")
+            print(flag)
+            break
+
+        # Handle the response based on its type
+        if message_type == "retry":
+            last_guess = json_data["guesses"][-1]
+            recent_marks = last_guess["marks"]
+            letters_in_correct_answer = filter_letters_by_numbers(current_guess, recent_marks)
+
+            next_possible_guesses = find_words_with_letters(all_words, letters_in_correct_answer)
+            current_guess = select_random_word(next_possible_guesses)
+
+            # Selects new word if current word had all 0 marks
+            if not letters_in_correct_answer:
+                current_guess = select_random_word(all_words)
+        else:
+            print(f"Unexpected response type: {message_type}")
+
+    # Close the socket at the end of the loop
+    client_socket.close()
+
+
+if __name__ == '__main__':
+    main()
